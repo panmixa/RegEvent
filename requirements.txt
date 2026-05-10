@@ -1,7 +1,4 @@
 python-telegram-bot==20.7
-gspread==6.0.0
-google-auth==2.26.2
-google-auth-oauthlib==1.2.0
-google-auth-httplib2==0.2.0
 python-dotenv==1.0.0
 pytz==2023.3
+aiohttp==3.9.1
