@@ -281,6 +281,9 @@ async def get_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     category = int(category_text)
     context.user_data['category'] = category
     
+    # Показати індикатор "набирає текст..." під час перевірки
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
     user_id = update.effective_user.id
     is_duplicate = await apps_script_manager.check_duplicate(category, user_id)
     
@@ -308,6 +311,9 @@ async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     
     context.user_data['answer'] = update.message.text.strip()
+    
+    # Показати індикатор "набирає текст..." під час збереження
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     user = update.effective_user
     user_id = user.id
