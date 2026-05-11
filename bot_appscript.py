@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
+import asyncio
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -74,7 +75,7 @@ class AppsScriptManager:
                     'user_id': user_id,
                     'category': category
                 }
-                async with session.get(self.webhook_url, params=params, timeout=10) as response:
+                async with session.get(self.webhook_url, params=params, timeout=30) as response:
                     if response.status == 200:
                         data = await response.json()
                         return data.get('exists', False)
@@ -87,39 +88,55 @@ class AppsScriptManager:
     
     async def add_entry(self, category: int, user_id: int, username: str, 
                        fullname: str, phone: str, answer: str) -> dict:
-        """Додати запис у таблицю через Apps Script"""
-        try:
-            timestamp = datetime.now(pytz.timezone('Europe/Kiev')).strftime('%Y-%m-%d %H:%M:%S')
-            
-            payload = {
-                'action': 'add_entry',
-                'fullname': fullname,
-                'phone': phone,
-                'username': f"@{username}" if username else "Немає username",
-                'user_id': user_id,
-                'category': category,
-                'answer': answer,
-                'timestamp': timestamp
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.webhook_url, 
-                    json=payload,
-                    headers={'Content-Type': 'application/json'},
-                    timeout=10
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        logger.info(f"Додано запис #{data.get('number')} для користувача {user_id}")
-                        return data
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"Помилка додавання запису: {response.status} - {error_text}")
-                        raise Exception(f"Apps Script error: {response.status}")
-        except Exception as e:
-            logger.error(f"Помилка додавання запису: {e}")
-            raise
+        """Додати запис у таблицю через Apps Script з retry логікою"""
+        max_retries = 3
+        retry_delay = 2  # секунди
+        
+        for attempt in range(max_retries):
+            try:
+                timestamp = datetime.now(pytz.timezone('Europe/Kiev')).strftime('%Y-%m-%d %H:%M:%S')
+                
+                payload = {
+                    'action': 'add_entry',
+                    'fullname': fullname,
+                    'phone': phone,
+                    'username': f"@{username}" if username else "Немає username",
+                    'user_id': user_id,
+                    'category': category,
+                    'answer': answer,
+                    'timestamp': timestamp
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.webhook_url, 
+                        json=payload,
+                        headers={'Content-Type': 'application/json'},
+                        timeout=30
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            logger.info(f"Додано запис #{data.get('number')} для користувача {user_id}")
+                            return data
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"Помилка додавання запису (спроба {attempt + 1}/{max_retries}): {response.status} - {error_text}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(retry_delay)
+                                continue
+                            raise Exception(f"Apps Script error: {response.status}")
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout при додаванні запису (спроба {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                raise Exception("Apps Script timeout після всіх спроб")
+            except Exception as e:
+                logger.error(f"Помилка додавання запису (спроба {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                raise
 
 
 def is_registration_open() -> tuple[bool, str]:
