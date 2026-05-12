@@ -4,12 +4,13 @@ from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 import asyncio
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ConversationHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -251,34 +252,44 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     
     context.user_data['phone'] = update.message.text.strip()
+    
+    # Створити inline-кнопки для вибору категорії
+    keyboard = [
+        [InlineKeyboardButton("Категорія 1", callback_data="category_1")],
+        [InlineKeyboardButton("Категорія 3", callback_data="category_3")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
         "Чудово! 🎯\n\n"
         "Тепер оберіть категорію:\n\n"
         "1️⃣ Категорія 1 — назва продукту + рекомендація\n"
-        "3️⃣ Категорія 3 — назва продукту\n\n"
-        "Введіть номер категорії (1 або 3):"
+        "3️⃣ Категорія 3 — назва продукту",
+        reply_markup=reply_markup
     )
     return CATEGORY
 
 
 async def get_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримати категорію"""
+    """Отримати категорію через inline-кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
     is_open, message = is_registration_open()
     if not is_open:
-        await update.message.reply_text(message)
+        await query.edit_message_text(message)
         return ConversationHandler.END
     
-    category_text = update.message.text.strip()
+    # Отримати категорію з callback_data
+    callback_data = query.data
+    if callback_data == "category_1":
+        category = 1
+    elif callback_data == "category_3":
+        category = 3
+    else:
+        await query.edit_message_text("❌ Помилка вибору категорії. Спробуйте ще раз або введіть /start")
+        return ConversationHandler.END
     
-    if category_text not in ['1', '3']:
-        await update.message.reply_text(
-            "❌ Будь ласка, введіть 1 або 3.\n\n"
-            "1️⃣ — назва продукту + рекомендація\n"
-            "3️⃣ — назва продукту"
-        )
-        return CATEGORY
-    
-    category = int(category_text)
     context.user_data['category'] = category
     
     # Показати індикатор "набирає текст..." під час перевірки
@@ -288,7 +299,7 @@ async def get_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     is_duplicate = await apps_script_manager.check_duplicate(category, user_id)
     
     if is_duplicate:
-        await update.message.reply_text(
+        await query.edit_message_text(
             f"❌ Ви вже надіслали відповідь у категорії {category}.\n\n"
             "Кожен учасник може надіслати тільки одну відповідь в одній категорії.\n\n"
             "Якщо хочете взяти участь в іншій категорії, введіть /start"
@@ -296,7 +307,7 @@ async def get_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
     
     category_desc = "назва продукту + рекомендація" if category == 1 else "назва продукту"
-    await update.message.reply_text(
+    await query.edit_message_text(
         f"Відмінно! Ви обрали категорію {category} ({category_desc}) ✅\n\n"
         "Тепер введіть вашу відповідь:"
     )
@@ -435,7 +446,7 @@ def main() -> None:
         states={
             FULLNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_fullname)],
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-            CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_category)],
+            CATEGORY: [CallbackQueryHandler(get_category)],
             ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_answer)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
