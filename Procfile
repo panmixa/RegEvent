@@ -1,1 +1,1 @@
-web: python bot_appscript.py
+worker: python bot_appscript.py
