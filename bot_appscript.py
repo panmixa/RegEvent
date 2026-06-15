@@ -5,6 +5,7 @@ import pytz
 from dotenv import load_dotenv
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,6 +15,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.request import HTTPXRequest
 import aiohttp
 import json
 from pathlib import Path
@@ -433,13 +435,45 @@ async def admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Глобальний обробник помилок — щоб мережеві збої не зупиняли бота."""
+    err = context.error
+    # Мережеві помилки (ReadError/TimeoutError тощо) — очікувані, лише логуємо.
+    if isinstance(err, NetworkError):
+        logger.warning(f"Мережева помилка (бот продовжує роботу): {err}")
+        return
+    logger.error("Необроблена помилка під час обробки оновлення:", exc_info=err)
+
+
 def main() -> None:
     """Запуск бота"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN не знайдено в .env файлі")
     
-    application = Application.builder().token(token).build()
+    # Збільшені таймаути та пул з'єднань — стійкість до мережевих блипів.
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=10.0,
+        read_timeout=10.0,
+        write_timeout=10.0,
+        pool_timeout=10.0,
+    )
+    # Окремий request для довгого getUpdates (read_timeout > polling timeout).
+    get_updates_request = HTTPXRequest(
+        connection_pool_size=2,
+        connect_timeout=10.0,
+        read_timeout=40.0,
+        pool_timeout=10.0,
+    )
+
+    application = (
+        Application.builder()
+        .token(token)
+        .request(request)
+        .get_updates_request(get_updates_request)
+        .build()
+    )
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
@@ -453,19 +487,41 @@ def main() -> None:
     )
     
     application.add_handler(conv_handler)
-    
+
     # Адмін-команди
     application.add_handler(CommandHandler('admin_stop', admin_stop))
     application.add_handler(CommandHandler('admin_start', admin_start))
     application.add_handler(CommandHandler('admin_status', admin_status))
-    
+
+    # Глобальний обробник помилок
+    application.add_error_handler(error_handler)
+
     logger.info("Бот запущено!")
     if ADMIN_USER_IDS:
         logger.info(f"Адміністратори: {ADMIN_USER_IDS}")
     else:
         logger.warning("УВАГА: Не налаштовано жодного адміністратора (ADMIN_USER_IDS)")
-    
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # На Render працюємо через webhook (стабільніше за polling, не засинає).
+    # Локально (без RENDER_EXTERNAL_URL) — fallback на polling.
+    external_url = os.getenv('RENDER_EXTERNAL_URL') or os.getenv('WEBHOOK_URL')
+    port = int(os.getenv('PORT', '10000'))
+
+    if external_url:
+        external_url = external_url.rstrip('/')
+        # Секретний шлях = токен, щоб сторонні не слали підроблені апдейти.
+        logger.info(f"Запуск у режимі webhook на порту {port}")
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=port,
+            url_path=token,
+            webhook_url=f"{external_url}/{token}",
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+    else:
+        logger.info("RENDER_EXTERNAL_URL не задано — запуск у режимі polling (локально)")
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == '__main__':
