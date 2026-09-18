@@ -4,14 +4,13 @@ from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ConversationHandler,
-    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -34,30 +33,44 @@ ADMIN_USER_IDS = [int(id.strip()) for id in os.getenv('ADMIN_USER_IDS', '').spli
 # Файл для збереження стану бота
 BOT_STATE_FILE = Path(__file__).parent / 'bot_state.json'
 
-FULLNAME, PHONE, CATEGORY, ANSWER = range(4)
+FULLNAME, PHONE, ANSWER = range(3)
 
-WELCOME_MESSAGE = """Друзі, вітаю! 👋
+# Розіграш проводиться лише в першій категорії
+CATEGORY = 1
 
-Цей бот створений для зручної та швидкої фіксації ваших відповідей у розіграші «Вгадай товар з L'Oréal».
+WELCOME_MESSAGE = """Привіт! 👋 Вітаю тебе на розіграші «Вітамінний тиждень із Sunlife»! ☀️
 
-Бот працює з понеділка по п'ятницю.  
-⏰ У п'ятницю о 16:00 прийом відповідей зупиняється.
+Тут ти можеш зареєструвати відповідь у першій категорії розіграшу — поділитися якби ти робив (робила) комплексну рекомендацію продуктів Sunlife для клієнта 💊
 
-Для участі напишіть, будь ласка:
-• ПІБ  
-• номер телефону  
-• категорію, у якій хочете дати відповідь та саму відповідь 
+Що робити далі? Зараз покажу крок за кроком 👇"""
 
-Категорії:
+STEPS_MESSAGE = """До участі лише 3 кроки 👇
 
-1 категорія — назва продукту + рекомендація  
-3 категорія — назва продукту
+1️⃣ Вкажи своє прізвище, ім'я та по батькові.
 
-Ви можете брати участь у всіх категоріях — так ваші шанси на перемогу збільшуються.
+2️⃣ Напиши свій номер телефону.
 
-Навіть якщо у вашій аптеці немає продукції La Roche-Posay, CeraVe та Vichy, ви все одно можете брати участь.
+3️⃣ Поділися комплексною рекомендацією для клієнта: поєднай два або більше продуктів Sunlife та поясни, чому пропонуєш їх разом.
 
-Вперед до перемоги! 🏆"""
+Наприклад:
+«Рекомендую Магній та Омега-3 для підтримки нервової системи й роботи серця. А за акцією 1+1=3 до них можна обрати вітамін С для підтримки імунітету та отримати його в подарунок!» 🎁"""
+
+STEP1_MESSAGE = "1️⃣ Крок 1 з 3\n\nВкажи своє прізвище, ім'я та по батькові 👇"
+
+STEP2_MESSAGE = "Дякую! ✅\n\n2️⃣ Крок 2 з 3\n\nНапиши свій номер телефону (наприклад: +380501234567) 👇"
+
+STEP3_MESSAGE = ("Чудово! ✅\n\n3️⃣ Крок 3 з 3\n\n"
+                 "Поділися комплексною рекомендацією для клієнта: поєднай два або більше продуктів Sunlife "
+                 "та поясни, чому пропонуєш їх разом 👇")
+
+ALREADY_REGISTERED_MESSAGE = ("Ти вже зареєстрував (зареєструвала) відповідь у першій категорії розіграшу ✅\n\n"
+                              "Кожен учасник може надіслати лише одну відповідь. Результати оголосимо в п'ятницю. Бажаю удачі! ☀️")
+
+FINAL_MESSAGE = """Дякую! Твою відповідь зареєстровано ✅
+
+Твій номер учасника в першій категорії розіграшу — {number} 🎟️
+
+Результати оголосимо в п'ятницю. Бажаю удачі! ☀️"""
 
 
 class AppsScriptManager:
@@ -224,100 +237,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     
     await update.message.reply_text(WELCOME_MESSAGE)
-    await update.message.reply_text(
-        "Почнемо реєстрацію! 📝\n\n"
-        "Будь ласка, введіть ваше ПІБ (Прізвище Ім'я По батькові):"
-    )
+    
+    # Перевірка, чи користувач уже брав участь (одна відповідь на учасника)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    if await apps_script_manager.check_duplicate(CATEGORY, update.effective_user.id):
+        await update.message.reply_text(ALREADY_REGISTERED_MESSAGE)
+        return ConversationHandler.END
+    
+    context.user_data.clear()
+    await update.message.reply_text(STEPS_MESSAGE)
+    await update.message.reply_text(STEP1_MESSAGE)
     return FULLNAME
 
 
 async def get_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримати ПІБ"""
+    """Крок 1: отримати ПІБ"""
     is_open, message = is_registration_open()
     if not is_open:
         await update.message.reply_text(message)
         return ConversationHandler.END
     
     context.user_data['fullname'] = update.message.text.strip()
-    await update.message.reply_text(
-        "Дякую! 📱\n\n"
-        "Тепер введіть ваш номер телефону (наприклад: +380501234567):"
-    )
+    await update.message.reply_text(STEP2_MESSAGE)
     return PHONE
 
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримати номер телефону"""
+    """Крок 2: отримати номер телефону"""
     is_open, message = is_registration_open()
     if not is_open:
         await update.message.reply_text(message)
         return ConversationHandler.END
     
     context.user_data['phone'] = update.message.text.strip()
-    
-    # Створити inline-кнопки для вибору категорії
-    keyboard = [
-        [InlineKeyboardButton("Категорія 1", callback_data="category_1")],
-        [InlineKeyboardButton("Категорія 3", callback_data="category_3")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "Чудово! 🎯\n\n"
-        "Тепер оберіть категорію:\n\n"
-        "1️⃣ Категорія 1 — назва продукту + рекомендація\n"
-        "3️⃣ Категорія 3 — назва продукту",
-        reply_markup=reply_markup
-    )
-    return CATEGORY
-
-
-async def get_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримати категорію через inline-кнопки"""
-    query = update.callback_query
-    await query.answer()
-    
-    is_open, message = is_registration_open()
-    if not is_open:
-        await query.edit_message_text(message)
-        return ConversationHandler.END
-    
-    # Отримати категорію з callback_data
-    callback_data = query.data
-    if callback_data == "category_1":
-        category = 1
-    elif callback_data == "category_3":
-        category = 3
-    else:
-        await query.edit_message_text("❌ Помилка вибору категорії. Спробуйте ще раз або введіть /start")
-        return ConversationHandler.END
-    
-    context.user_data['category'] = category
-    
-    # Показати індикатор "набирає текст..." під час перевірки
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    
-    user_id = update.effective_user.id
-    is_duplicate = await apps_script_manager.check_duplicate(category, user_id)
-    
-    if is_duplicate:
-        await query.edit_message_text(
-            f"❌ Ви вже надіслали відповідь у категорії {category}.\n\n"
-            "Кожен учасник може надіслати тільки одну відповідь в одній категорії.\n\n"
-            "Якщо хочете взяти участь в іншій категорії, введіть /start"
-        )
-        return ConversationHandler.END
-    
-    category_desc = "назва продукту + рекомендація" if category == 1 else "назва продукту"
-    await query.edit_message_text(
-        f"Відмінно! Ви обрали категорію {category} ({category_desc}) ✅\n\n"
-        "Тепер введіть вашу відповідь:"
-    )
+    await update.message.reply_text(STEP3_MESSAGE)
     return ANSWER
 
 
 async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримати відповідь та зберегти все через Apps Script"""
+    """Крок 3: отримати рекомендацію та зберегти все через Apps Script"""
     is_open, message = is_registration_open()
     if not is_open:
         await update.message.reply_text(message)
@@ -333,12 +291,16 @@ async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     username = user.username or ""
     fullname = context.user_data['fullname']
     phone = context.user_data['phone']
-    category = context.user_data['category']
     answer = context.user_data['answer']
+    
+    # Повторна перевірка дублікату безпосередньо перед збереженням
+    if await apps_script_manager.check_duplicate(CATEGORY, user_id):
+        await update.message.reply_text(ALREADY_REGISTERED_MESSAGE)
+        return ConversationHandler.END
     
     try:
         result = await apps_script_manager.add_entry(
-            category=category,
+            category=CATEGORY,
             user_id=user_id,
             username=username,
             fullname=fullname,
@@ -348,21 +310,12 @@ async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         
         number = result.get('number', '?')
         
-        await update.message.reply_text(
-            f"✅ Дякуємо за вашу відповідь!\n\n"
-            f"📋 Ваші дані зареєстровано:\n"
-            f"• ПІБ: {fullname}\n"
-            f"• Телефон: {phone}\n"
-            f"• Категорія: {category}\n"
-            f"• Ваш номерок: Категорія {category}, номер {number}\n\n"
-            f"🎉 Бажаємо удачі у розіграші!\n\n"
-            f"Якщо хочете взяти участь в іншій категорії, введіть /start"
-        )
+        await update.message.reply_text(FINAL_MESSAGE.format(number=number))
     except Exception as e:
         logger.error(f"Помилка збереження даних: {e}")
         await update.message.reply_text(
-            "❌ Виникла помилка при збереженні ваших даних. "
-            "Будь ласка, спробуйте ще раз або зверніться до адміністратора."
+            "❌ Виникла помилка при збереженні твоєї відповіді. "
+            "Будь ласка, спробуй ще раз (/start) або звернись до адміністратора."
         )
     
     return ConversationHandler.END
@@ -371,7 +324,7 @@ async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Скасувати реєстрацію"""
     await update.message.reply_text(
-        "Реєстрацію скасовано. Якщо хочете почати знову, введіть /start"
+        "Реєстрацію скасовано. Щоб почати знову, надішли /start"
     )
     return ConversationHandler.END
 
@@ -480,7 +433,6 @@ def main() -> None:
         states={
             FULLNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_fullname)],
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-            CATEGORY: [CallbackQueryHandler(get_category)],
             ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_answer)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
