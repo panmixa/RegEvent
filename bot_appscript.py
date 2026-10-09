@@ -4,12 +4,13 @@ from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 import asyncio
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ConversationHandler,
     filters,
     ContextTypes,
@@ -17,6 +18,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 import aiohttp
 import json
+import re
 from pathlib import Path
 
 load_dotenv()
@@ -33,44 +35,58 @@ ADMIN_USER_IDS = [int(id.strip()) for id in os.getenv('ADMIN_USER_IDS', '').spli
 # Файл для збереження стану бота
 BOT_STATE_FILE = Path(__file__).parent / 'bot_state.json'
 
-FULLNAME, PHONE, ANSWER = range(3)
+CONFIRM, FULLNAME, PHONE, ANSWER = range(4)
+
+PHONE_RE = re.compile(r'^\+380\d{9}$')
 
 # Розіграш проводиться лише в першій категорії
 CATEGORY = 1
 
-WELCOME_MESSAGE = """Привіт! 👋 Вітаю тебе на розіграші «Вітамінний тиждень із Sunlife»! ☀️
+WELCOME_MESSAGE = """Привіт! 👋 Вітаю в боті реєстрації відповідей для розіграшу «Помагайко Челендж» 🤖
 
-Тут ти можеш зареєструвати відповідь у першій категорії розіграшу — поділитися якби ти робив (робила) комплексну рекомендацію продуктів Sunlife для клієнта 💊
+Вже спробував(-ла) виконати завдання в Помагайко? Тоді поділися, як усе пройшло! Я допоможу зареєструвати відповідь та отримати номерок для розіграшу 🎁
 
-Що робити далі? Зараз покажу крок за кроком 👇"""
+Попереду три прості кроки. Почнімо?"""
 
-STEPS_MESSAGE = """До участі лише 3 кроки 👇
+REGISTER_BUTTON_TEXT = "Зареєструвати відповідь"
 
-1️⃣ Вкажи своє прізвище, ім'я та по батькові.
+STEP1_MESSAGE = """Крок 1. Знайомимося
 
-2️⃣ Напиши свій номер телефону.
+Як до тебе звертатися? 😊
+Напиши своє прізвище, ім'я та по батькові одним повідомленням."""
 
-3️⃣ Поділися комплексною рекомендацією для клієнта: поєднай два або більше продуктів Sunlife та поясни, чому пропонуєш їх разом.
+STEP2_MESSAGE = """Крок 2. Залишаємо контакт
 
-Наприклад:
-«Рекомендую Магній та Омега-3 для підтримки нервової системи й роботи серця. А за акцією 1+1=3 до них можна обрати вітамін С для підтримки імунітету та отримати його в подарунок!» 🎁"""
+📱 Вкажи свій контактний номер телефону, щоб ми могли зв'язатися з тобою в разі виграшу.
+Введи номер у форматі +380XXXXXXXXX"""
 
-STEP1_MESSAGE = "1️⃣ Крок 1 з 3\n\nВкажи своє прізвище, ім'я та по батькові 👇"
+PHONE_INVALID_MESSAGE = """Хм, схоже, номер у іншому форматі 🤔
+Введи номер у форматі +380XXXXXXXXX (наприклад: +380501234567)"""
 
-STEP2_MESSAGE = "Дякую! ✅\n\n2️⃣ Крок 2 з 3\n\nНапиши свій номер телефону (наприклад: +380501234567) 👇"
+STEP3_MESSAGE = """Крок 3. Ділимося досвідом
 
-STEP3_MESSAGE = ("Чудово! ✅\n\n3️⃣ Крок 3 з 3\n\n"
-                 "Поділися комплексною рекомендацією для клієнта: поєднай два або більше продуктів Sunlife "
-                 "та поясни, чому пропонуєш їх разом 👇")
+А тепер найцікавіше — як пройшло твоє тестування Помагайко 9-1-1? 💬
+Напиши розгорнуту відповідь одним повідомленням. Ось кілька запитань, які допоможуть:
+▫️ Чи отримав (отримала) відповідь на своє запитання в Помагайко 9-1-1? Якщо не секрет, що питала (питав)?
+▫️ Чи допомогла відповідь Помагайко 9-1-1? Чи все було зрозуміло?
+▫️ Що сподобалося, а що було незручним або не спрацювало?
+▫️ Що хотілося б додати чи покращити?
 
-ALREADY_REGISTERED_MESSAGE = ("Ти вже зареєстрував (зареєструвала) відповідь у першій категорії розіграшу ✅\n\n"
-                              "Кожен учасник може надіслати лише одну відповідь. Результати оголосимо в п'ятницю. Бажаю удачі! ☀️")
+Нам важливі твої справжні враження — і позитивні, і критичні. Саме вони допоможуть зробити Помагайко 9-1-1 кориснішим у роботі ❤️"""
 
-FINAL_MESSAGE = """Дякую! Твою відповідь зареєстровано ✅
+ALREADY_REGISTERED_MESSAGE = ("Ти вже зареєстрував (зареєструвала) відповідь у розіграші «Помагайко Челендж» ✅\n\n"
+                              "Кожен учасник може надіслати лише одну відповідь. "
+                              "Стеж за оголошенням результатів у розділі «Грай та вигравай» групи «Навчання 9-1-1» 🍀")
 
-Твій номер учасника в першій категорії розіграшу — {number} 🎟️
+FINAL_MESSAGE = """Готово! Твою відповідь зареєстровано ✅
 
-Результати оголосимо в п'ятницю. Бажаю удачі! ☀️"""
+🎟 Твій номерок для розіграшу — №{number}
+
+Дякуємо, що тестуєш Помагайко 9-1-1 та ділишся враженнями! Завдяки твоєму досвіду він ставатиме ще кращим цифровим колегою 🤖❤️
+
+Збережи свій номерок і стеж за оголошенням результатів у розділі «Грай та вигравай» групи «Навчання 9-1-1»
+
+Твій відгук уже допомагає. Тепер нехай пощастить і твоєму номерку! 🍀"""
 
 
 class AppsScriptManager:
@@ -93,7 +109,9 @@ class AppsScriptManager:
                 }
                 async with session.get(self.webhook_url, params=params, timeout=30) as response:
                     if response.status == 200:
-                        data = await response.json()
+                        data = await response.json(content_type=None)
+                        if data.get('error'):
+                            logger.error(f"Apps Script (check_duplicate) повернув помилку: {data['error']}")
                         return data.get('exists', False)
                     else:
                         logger.error(f"Помилка перевірки дублікатів: {response.status}")
@@ -131,7 +149,16 @@ class AppsScriptManager:
                         timeout=30
                     ) as response:
                         if response.status == 200:
-                            data = await response.json()
+                            raw = await response.text()
+                            try:
+                                data = json.loads(raw)
+                            except json.JSONDecodeError:
+                                logger.error(f"Apps Script повернув не JSON: {raw[:300]}")
+                                raise Exception("Apps Script повернув не JSON (перевірте деплой Web App)")
+                            # Apps Script повертає 200 навіть при помилці — перевіряємо поле error
+                            if data.get('error') or data.get('number') in (None, ''):
+                                logger.error(f"Apps Script повернув помилку: {data}")
+                                raise Exception(f"Apps Script error: {data.get('error') or 'немає номера у відповіді'}")
                             logger.info(f"Додано запис #{data.get('number')} для користувача {user_id}")
                             return data
                         else:
@@ -229,14 +256,12 @@ bot_state = BotStateManager(BOT_STATE_FILE)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обробник команди /start"""
+    """Обробник команди /start — вітання та кнопка «Зареєструвати відповідь»"""
     is_open, message = is_registration_open()
     
     if not is_open:
         await update.message.reply_text(message)
         return ConversationHandler.END
-    
-    await update.message.reply_text(WELCOME_MESSAGE)
     
     # Перевірка, чи користувач уже брав участь (одна відповідь на учасника)
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -245,9 +270,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     
     context.user_data.clear()
-    await update.message.reply_text(STEPS_MESSAGE)
-    await update.message.reply_text(STEP1_MESSAGE)
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(REGISTER_BUTTON_TEXT, callback_data="register")]])
+    await update.message.reply_text(WELCOME_MESSAGE, reply_markup=keyboard)
+    return CONFIRM
+
+
+async def confirm_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Натиснута кнопка «Зареєструвати відповідь» — переходимо до кроку 1"""
+    query = update.callback_query
+    await query.answer()
+    
+    is_open, message = is_registration_open()
+    if not is_open:
+        await query.message.reply_text(message)
+        return ConversationHandler.END
+    
+    # Прибрати кнопку, щоб не натискали двічі
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    
+    await query.message.reply_text(STEP1_MESSAGE)
     return FULLNAME
+
+
+async def confirm_text_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Користувач написав текст замість натискання кнопки — нагадуємо про кнопку"""
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(REGISTER_BUTTON_TEXT, callback_data="register")]])
+    await update.message.reply_text("Натисни кнопку нижче, щоб почати 👇", reply_markup=keyboard)
+    return CONFIRM
 
 
 async def get_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -269,13 +321,18 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(message)
         return ConversationHandler.END
     
-    context.user_data['phone'] = update.message.text.strip()
+    phone = update.message.text.strip().replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    if not PHONE_RE.match(phone):
+        await update.message.reply_text(PHONE_INVALID_MESSAGE)
+        return PHONE
+    
+    context.user_data['phone'] = phone
     await update.message.reply_text(STEP3_MESSAGE)
     return ANSWER
 
 
 async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Крок 3: отримати рекомендацію та зберегти все через Apps Script"""
+    """Крок 3: отримати відгук та зберегти все через Apps Script"""
     is_open, message = is_registration_open()
     if not is_open:
         await update.message.reply_text(message)
@@ -431,11 +488,16 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
+            CONFIRM: [
+                CallbackQueryHandler(confirm_register, pattern="^register$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_text_fallback),
+            ],
             FULLNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_fullname)],
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
             ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_answer)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)],
+        allow_reentry=True,
     )
     
     application.add_handler(conv_handler)
